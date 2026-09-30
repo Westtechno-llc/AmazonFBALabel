@@ -235,10 +235,10 @@ function fitText(text, maxPt, minPt, maxW, maxH){
   let pt = maxPt, lines;
   for (; pt >= minPt; pt -= 0.25) {
     lines = split(text, pt, maxW);
-    if (lines.length * pt/72*1.15 <= maxH) break;
+    if (lines.length * pt/72*1.35 <= maxH) break;
   }
   if (pt < minPt) { pt = minPt; lines = split(text, pt, maxW); }
-  return {pt, lines, lh: pt/72*1.15};
+  return {pt, lines, lh: pt/72*1.35};
 }
 function clean(s){
   return String(s||'').replace(/[‘’]/g,"'").replace(/[“”]/g,'"')
@@ -253,16 +253,16 @@ function layout(p, W, H){
     const M = enc.total + 20;
     const k = Math.floor(avail*DPI/M);
     const mod = k >= 1 ? k/DPI : avail/M;
-    const bw = enc.total*mod, bx = (W-bw)/2, by = oy + 0.08*s, bh = 0.32*s;
+    const bw = enc.total*mod, bx = (W-bw)/2, by = oy + 0.14*s, bh = 0.34*s;
     enc.bars.forEach(([x,w]) => out.rects.push([bx + x*mod, by, w*mod, bh]));
   }
-  out.texts.push({str:p.fnsku, x:W/2, y:oy+0.52*s, pt:9*s});
+  out.texts.push({str:p.fnsku, x:W/2, y:oy+0.63*s, pt:8*s});
   const full = clean((state.cond ? state.cond + ' - ' : '') + (p.title||''));
   if (full) {
-    const top = oy + 0.57*s, maxH = 0.36*s;
-    const f = fitText(full, 6*s, 3.5*s, avail, maxH);
+    const top = oy + 0.66*s, maxH = 0.31*s;
+    const f = fitText(full, 5.5*s, 3.5*s, avail, maxH);
     const blockH = f.lines.length * f.lh;
-    let y = top + f.pt/72*0.85;
+    let y = top + f.pt/72*1.0;
     f.lines.forEach(l => { out.texts.push({str:l, x:W/2, y, pt:f.pt}); y += f.lh; });
   }
   return out;
@@ -342,6 +342,7 @@ const FN_RE = /^(X0[0-9A-Z]{8}|B0[0-9A-Z]{8})$/;
 const COND_RE = /^(New|Used\s*[-–]?\s*(Like New|Very Good|Good|Acceptable)|Refurbished|Collectible.*)$/i;
 const docs = {}, sources = {};
 const SCALE = 300/72;
+const USE_CROP = false; // labels are redrawn cleanly from the PDF's own FNSKU and text
 function itemBox(it, vp){
   const tx = pdfjsLib.Util.transform(vp.transform, it.transform);
   const fh = Math.hypot(tx[2], tx[3]);
@@ -418,7 +419,7 @@ async function importPdf(file){
         });
         continue;
       }
-      const need = labels.filter(l => !l.rec.src);
+      const need = USE_CROP ? labels.filter(l => !l.rec.src) : [];
       if (!need.length) continue;
       const cv = document.createElement('canvas');
       cv.width = Math.ceil(vp.width); cv.height = Math.ceil(vp.height);
