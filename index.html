@@ -167,6 +167,7 @@ ol{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:4px;font-si
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jsbarcode/3.11.5/JsBarcode.all.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"></script>
 <script>
@@ -186,7 +187,8 @@ let state = {
 };
 try{ const s = JSON.parse(localStorage.getItem(KEY)||'null'); if(s && Array.isArray(s.rows)) state = Object.assign(state, s); }catch(e){}
 let focusIdx = 0;
-const save = () => { try{ localStorage.setItem(KEY, JSON.stringify(state)); }catch(e){} };
+const save = () => { try{ localStorage.setItem(KEY, JSON.stringify(Object.assign({}, state, {rows: state.rows.map(r => ({fnsku:r.fnsku, title:r.title, qty:r.qty}))}))); }catch(e){} };
+state.rows.forEach(r => { delete r.src; });
 
 if (window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 const dlCap = (window.claude && window.claude.use) ? window.claude.use('downloads').catch(()=>null) : Promise.resolve(null);
@@ -223,16 +225,20 @@ function encode(code){
 
 /* ---------- layout (inches), shared by preview and PDF ---------- */
 let measurer = null;
-function wrap(text, pt, maxW){
+function split(text, pt, maxW){
   if (!measurer) measurer = new jspdf.jsPDF({unit:'in', format:[2,1], orientation:'landscape'});
   measurer.setFont('helvetica','normal'); measurer.setFontSize(pt);
-  let lines = measurer.splitTextToSize(text, maxW);
-  if (lines.length > 2) {
-    let l2 = lines[1];
-    while (l2.length && measurer.getTextWidth(l2 + '...') > maxW) l2 = l2.slice(0,-1);
-    lines = [lines[0], l2.trim() + '...'];
+  return measurer.splitTextToSize(text, maxW);
+}
+// full text, never cut: shrink the font until every line fits the space
+function fitText(text, maxPt, minPt, maxW, maxH){
+  let pt = maxPt, lines;
+  for (; pt >= minPt; pt -= 0.25) {
+    lines = split(text, pt, maxW);
+    if (lines.length * pt/72*1.15 <= maxH) break;
   }
-  return lines;
+  if (pt < minPt) { pt = minPt; lines = split(text, pt, maxW); }
+  return {pt, lines, lh: pt/72*1.15};
 }
 function clean(s){
   return String(s||'').replace(/[‘’]/g,"'").replace(/[“”]/g,'"')
@@ -247,14 +253,18 @@ function layout(p, W, H){
     const M = enc.total + 20;
     const k = Math.floor(avail*DPI/M);
     const mod = k >= 1 ? k/DPI : avail/M;
-    const bw = enc.total*mod, bx = (W-bw)/2, by = oy + 0.12*s, bh = 0.38*s;
+    const bw = enc.total*mod, bx = (W-bw)/2, by = oy + 0.08*s, bh = 0.32*s;
     enc.bars.forEach(([x,w]) => out.rects.push([bx + x*mod, by, w*mod, bh]));
   }
-  out.texts.push({str:p.fnsku, x:W/2, y:oy+0.64*s, pt:13*s});
+  out.texts.push({str:p.fnsku, x:W/2, y:oy+0.52*s, pt:9*s});
   const full = clean((state.cond ? state.cond + ' - ' : '') + (p.title||''));
-  const lines = full ? wrap(full, 8.5*s, avail) : [];
-  const ys = lines.length === 1 ? [0.79] : [0.77, 0.89];
-  lines.forEach((l,i) => out.texts.push({str:l, x:W/2, y:oy+ys[i]*s, pt:8.5*s}));
+  if (full) {
+    const top = oy + 0.57*s, maxH = 0.36*s;
+    const f = fitText(full, 6*s, 3.5*s, avail, maxH);
+    const blockH = f.lines.length * f.lh;
+    let y = top + f.pt/72*0.85;
+    f.lines.forEach(l => { out.texts.push({str:l, x:W/2, y, pt:f.pt}); y += f.lh; });
+  }
   return out;
 }
 
@@ -279,6 +289,13 @@ function drawPreview(){
     ctx.fillText('Add an FNSKU to see the label', cv.width/2, cv.height/2);
     return;
   }
+  const S = p.src && sources[p.src];
+  if (S) {
+    const F = fitBox(S, W, H);
+    ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(S.img, F.dx*ppi, F.dy*ppi, F.dw*ppi, F.dh*ppi);
+    return;
+  }
   const L = layout(p, W, H);
   ctx.fillStyle = '#000';
   L.rects.forEach(([x,y,w,h]) => ctx.fillRect(x*ppi, y*ppi, w*ppi, h*ppi));
@@ -297,6 +314,7 @@ function renderRows(){
       <button class="x" type="button" aria-label="Remove product">×</button>`;
     const [f,t,q,x] = d.children;
     f.value = r.fnsku; t.value = r.title; q.value = r.qty;
+    if (r.src && sources[r.src]) { f.readOnly = t.readOnly = true; f.title = t.title = 'Printed exactly as in the Amazon PDF'; }
     const mark = () => f.classList.toggle('bad', !!r.fnsku && !encode(r.fnsku));
     mark();
     f.addEventListener('input', () => { r.fnsku = f.value.toUpperCase().replace(/\s/g,''); f.value = r.fnsku; mark(); changed(); });
@@ -307,7 +325,8 @@ function renderRows(){
     wrapEl.appendChild(d);
   });
 }
-function totalLabels(){ return state.rows.reduce((n,r) => n + (r.fnsku && encode(r.fnsku) ? (r.qty||0) : 0), 0); }
+function rowOk(r){ return !!((r.src && sources[r.src]) || (r.fnsku && encode(r.fnsku))); }
+function totalLabels(){ return state.rows.reduce((n,r) => n + (rowOk(r) ? (r.qty||0) : 0), 0); }
 function changed(redraw = true){
   state.example = false;
   const n = totalLabels();
@@ -318,51 +337,118 @@ function changed(redraw = true){
   save();
 }
 
-/* ---------- PDF import ---------- */
+/* ---------- PDF import: find each label in Amazon's PDF and keep it exactly as it is ---------- */
 const FN_RE = /^(X0[0-9A-Z]{8}|B0[0-9A-Z]{8})$/;
 const COND_RE = /^(New|Used\s*[-–]?\s*(Like New|Very Good|Good|Acceptable)|Refurbished|Collectible.*)$/i;
+const docs = {}, sources = {};
+const SCALE = 300/72;
+function itemBox(it, vp){
+  const tx = pdfjsLib.Util.transform(vp.transform, it.transform);
+  const fh = Math.hypot(tx[2], tx[3]);
+  const x0 = tx[4], x1 = tx[4] + (it.width||0)*vp.scale;
+  return {x0:Math.min(x0,x1), x1:Math.max(x0,x1), y0:tx[5]-fh, y1:tx[5]+fh*0.25};
+}
+function grow(b, c){ b.x0=Math.min(b.x0,c.x0); b.x1=Math.max(b.x1,c.x1); b.y0=Math.min(b.y0,c.y0); b.y1=Math.max(b.y1,c.y1); }
+function labelRegion(l, labels, W, H){
+  const tol = 0.15*SCALE*72;
+  const cols = [];
+  labels.map(o=>o.cx).sort((a,b)=>a-b).forEach(c => { if (!cols.length || c - cols[cols.length-1] > tol) cols.push(c); });
+  let pitchX = null;
+  for (let i=1;i<cols.length;i++){ const d = cols[i]-cols[i-1]; if (pitchX === null || d < pitchX) pitchX = d; }
+  const left = pitchX ? Math.max(0, l.cx - pitchX/2) : 0;
+  const right = pitchX ? Math.min(W, l.cx + pitchX/2) : W;
+  const same = labels.filter(o => Math.abs(o.cx - l.cx) < tol).sort((a,b)=>a.fnTop-b.fnTop);
+  const i = same.indexOf(l), prev = same[i-1], next = same[i+1];
+  const pitchY = next ? next.fnTop - l.fnTop : prev ? l.fnTop - prev.fnTop : null;
+  const top = prev ? prev.box.y1 + 2 : (pitchY ? Math.max(0, l.box.y1 - pitchY) : 0);
+  const bottom = next ? Math.min(H, l.box.y1 + 3) : (pitchY ? Math.min(H, l.box.y1 + pitchY*0.1) : H);
+  return {x0:Math.floor(left), y0:Math.floor(top), x1:Math.ceil(right), y1:Math.ceil(bottom)};
+}
+function inkBox(ctx, R){
+  const w = R.x1-R.x0, h = R.y1-R.y0;
+  if (w <= 0 || h <= 0) return null;
+  const d = ctx.getImageData(R.x0, R.y0, w, h).data;
+  let minX=w, minY=h, maxX=-1, maxY=-1;
+  for (let y=0;y<h;y++) for (let x=0;x<w;x++){
+    const k=(y*w+x)*4;
+    if (d[k]+d[k+1]+d[k+2] < 540) { if(x<minX)minX=x; if(x>maxX)maxX=x; if(y<minY)minY=y; if(y>maxY)maxY=y; }
+  }
+  if (maxX < 0) return null;
+  const pad = 4;
+  return {x0:Math.max(0,R.x0+minX-pad), y0:Math.max(0,R.y0+minY-pad), x1:R.x0+maxX+1+pad, y1:R.y0+maxY+1+pad};
+}
 async function importPdf(file){
   const st = $('status'); st.classList.remove('err');
   if (!window.pdfjsLib) { st.textContent = 'The PDF reader did not load. Reload the page and try again.'; st.classList.add('err'); return; }
   st.textContent = `Reading ${file.name}…`;
   try {
     const buf = await file.arrayBuffer();
+    const docId = 'd' + Date.now();
+    docs[docId] = new Uint8Array(buf.slice(0));
     const pdf = await pdfjsLib.getDocument({data:new Uint8Array(buf)}).promise;
-    const found = {}; const order = []; let cond = null; let count = 0;
+    const found = {}; const order = []; let cond = null; let count = 0, cropped = 0;
     for (let pn = 1; pn <= pdf.numPages; pn++) {
       const page = await pdf.getPage(pn);
+      const vp = page.getViewport({scale:SCALE});
       const tc = await page.getTextContent();
-      const strs = tc.items.map(it => (it.str||'').trim()).filter(Boolean);
-      let cur = null, hits = 0;
-      for (const s of strs) {
+      const labels = [];
+      let cur = null;
+      for (const it of tc.items) {
+        const s = (it.str||'').trim(); if (!s) continue;
+        const b = itemBox(it, vp);
         if (FN_RE.test(s)) {
-          hits++; count++;
+          count++;
           if (!found[s]) { found[s] = {fnsku:s, title:'', qty:0}; order.push(s); }
           found[s].qty++;
-          cur = {rec:found[s], parts:[], done:false};
+          cur = {rec:found[s], parts:[], done:false, box:Object.assign({}, b), cx:(b.x0+b.x1)/2, fnTop:b.y0};
+          labels.push(cur);
           continue;
         }
         if (!cur || cur.done) continue;
+        grow(cur.box, b);
         if (COND_RE.test(s)) { cond = cond || s; finish(cur); continue; }
         const m = s.match(/^(New|Used[^-]*?)\s+-\s+(.*)$/i);
-        if (m) { cond = cond || m[1]; cur.parts.push(m[2]); }
-        else cur.parts.push(s);
-        if (cur.parts.length >= 4) finish(cur);
+        if (m) { cond = cond || m[1]; cur.parts.push(m[2]); } else cur.parts.push(s);
+        if (cur.parts.length >= 8) finish(cur);
       }
       if (cur && !cur.done) finish(cur);
-      if (!hits) { // fallback: FNSKU embedded inside longer strings
-        const all = strs.join(' ');
-        (all.match(/\b(X0[0-9A-Z]{8})\b/g) || []).forEach(s => {
+      if (!labels.length) {
+        (tc.items.map(i=>i.str).join(' ').match(/\b(X0[0-9A-Z]{8})\b/g) || []).forEach(s => {
           count++; if (!found[s]) { found[s] = {fnsku:s, title:'', qty:0}; order.push(s); } found[s].qty++;
         });
+        continue;
       }
+      const need = labels.filter(l => !l.rec.src);
+      if (!need.length) continue;
+      const cv = document.createElement('canvas');
+      cv.width = Math.ceil(vp.width); cv.height = Math.ceil(vp.height);
+      const ctx = cv.getContext('2d', {willReadFrequently:true});
+      ctx.fillStyle = '#fff'; ctx.fillRect(0,0,cv.width,cv.height);
+      await page.render({canvasContext:ctx, viewport:vp}).promise;
+      for (const l of need) {
+        if (l.rec.src) continue;
+        const R = labelRegion(l, labels, cv.width, cv.height);
+        const I = inkBox(ctx, R); if (!I) continue;
+        I.x1 = Math.min(cv.width, I.x1); I.y1 = Math.min(cv.height, I.y1);
+        const a = vp.convertToPdfPoint(I.x0, I.y0), b = vp.convertToPdfPoint(I.x1, I.y1);
+        const img = document.createElement('canvas');
+        img.width = I.x1-I.x0; img.height = I.y1-I.y0;
+        img.getContext('2d').drawImage(cv, I.x0, I.y0, img.width, img.height, 0, 0, img.width, img.height);
+        const id = docId + '-' + pn + '-' + l.rec.fnsku;
+        sources[id] = {doc:docId, pageIndex:pn-1, rotate:((page.rotate||0)%360+360)%360,
+          box:{left:Math.min(a[0],b[0]), right:Math.max(a[0],b[0]), bottom:Math.min(a[1],b[1]), top:Math.max(a[1],b[1])},
+          img, w:img.width/SCALE/72, h:img.height/SCALE/72};
+        l.rec.src = id; cropped++;
+      }
+      cv.width = cv.height = 0;
     }
     function finish(c){ c.done = true; const t = c.parts.join(' ').replace(/\s+/g,' ').trim(); if (t.length > c.rec.title.length) c.rec.title = t; }
     if (!order.length) { st.textContent = `No FNSKU found in ${file.name}. Make sure it is the label PDF from Amazon (Print item labels).`; st.classList.add('err'); return; }
     state.rows = order.map(k => found[k]);
     if (cond) { const c = matchCond(cond); if (c !== null) { state.cond = c; $('cond').value = c; } }
     focusIdx = 0; renderRows(); changed();
-    st.textContent = `Loaded ${count} label${count===1?'':'s'} · ${order.length} product${order.length===1?'':'s'} from ${file.name}.`;
+    st.textContent = `Loaded ${count} label${count===1?'':'s'} · ${order.length} product${order.length===1?'':'s'} from ${file.name}.` +
+      (cropped ? ' Labels print exactly as in the PDF, scaled to fit.' : '');
   } catch (e) {
     st.textContent = `Could not read ${file.name}. ${e && e.message ? e.message : ''}`; st.classList.add('err');
   }
@@ -374,25 +460,47 @@ function matchCond(c){
 }
 
 /* ---------- PDF export ---------- */
-function buildPdf(){
+const FIT_MARGIN = 0.03; // inches kept clear on every side
+function fitBox(S, W, H){
+  const aw = W - 2*FIT_MARGIN, ah = H - 2*FIT_MARGIN;
+  const sc = Math.min(aw/S.w, ah/S.h);
+  const dw = S.w*sc, dh = S.h*sc;
+  return {sc, dw, dh, dx:(W-dw)/2, dy:(H-dh)/2};
+}
+async function buildPdf(){
+  const {PDFDocument, StandardFonts, rgb, degrees} = PDFLib;
   const {w:W, h:H} = dims();
   const sx = +state.sx || 0, sy = +state.sy || 0;
-  const orient = W >= H ? 'landscape' : 'portrait';
-  const doc = new jspdf.jsPDF({unit:'in', format:[W,H], orientation:orient, compress:true});
-  let first = true;
-  state.rows.forEach(r => {
-    if (!r.fnsku || !encode(r.fnsku) || !r.qty) return;
-    const L = layout(r, W, H);
-    for (let i = 0; i < r.qty; i++) {
-      if (!first) doc.addPage([W,H], orient);
-      first = false;
-      doc.setFillColor(0,0,0);
-      L.rects.forEach(([x,y,w,h]) => doc.rect(x+sx, y+sy, w, h, 'F'));
-      doc.setTextColor(0,0,0); doc.setFont('helvetica','normal');
-      L.texts.forEach(t => { doc.setFontSize(t.pt); doc.text(t.str, t.x+sx, t.y+sy, {align:'center', baseline:'alphabetic'}); });
+  const Wp = W*72, Hp = H*72;
+  const out = await PDFDocument.create();
+  const font = await out.embedFont(StandardFonts.Helvetica);
+  const loaded = {}, emb = {};
+  for (const r of state.rows) {
+    if (!rowOk(r) || !r.qty) continue;
+    let draw;
+    const S = r.src && sources[r.src];
+    if (S) {
+      if (!emb[r.src]) {
+        if (!loaded[S.doc]) loaded[S.doc] = await PDFDocument.load(docs[S.doc], {ignoreEncryption:true});
+        [emb[r.src]] = await out.embedPages([loaded[S.doc].getPage(S.pageIndex)], [S.box]);
+      }
+      const E = emb[r.src], F = fitBox(S, W, H);
+      const bx = (F.dx + sx)*72, by = Hp - (F.dy + sy + F.dh)*72, dw = F.dw*72, dh = F.dh*72;
+      const swap = S.rotate === 90 || S.rotate === 270;
+      const ew = swap ? dh : dw, eh = swap ? dw : dh;
+      const o = {0:{x:bx, y:by, r:0}, 90:{x:bx, y:by+dh, r:-90}, 180:{x:bx+dw, y:by+dh, r:180}, 270:{x:bx+dw, y:by, r:90}}[S.rotate] || {x:bx, y:by, r:0};
+      draw = pg => pg.drawPage(E, {x:o.x, y:o.y, width:ew, height:eh, rotate:degrees(o.r)});
+    } else {
+      const L = layout(r, W, H);
+      draw = pg => {
+        L.rects.forEach(([x,y,w,h]) => pg.drawRectangle({x:(x+sx)*72, y:Hp-(y+sy+h)*72, width:w*72, height:h*72, color:rgb(0,0,0)}));
+        L.texts.forEach(t => { const tw = font.widthOfTextAtSize(t.str, t.pt);
+          pg.drawText(t.str, {x:(t.x+sx)*72 - tw/2, y:Hp-(t.y+sy)*72, size:t.pt, font, color:rgb(0,0,0)}); });
+      };
     }
-  });
-  return doc.output('arraybuffer');
+    for (let i = 0; i < r.qty; i++) draw(out.addPage([Wp, Hp]));
+  }
+  return await out.save();
 }
 function fileName(){
   const rows = state.rows.filter(r => r.fnsku && r.qty);
@@ -404,7 +512,7 @@ async function download(){
   if (!totalLabels()) return;
   msg('Building PDF…');
   let buf;
-  try { buf = buildPdf(); } catch (e) { msg('Could not build the PDF: ' + (e.message||e)); return; }
+  try { buf = await buildPdf(); } catch (e) { msg('Could not build the PDF: ' + (e.message||e)); return; }
   const name = fileName();
   const dl = await dlCap;
   if (dl) {
@@ -424,7 +532,7 @@ function legacySave(buf, name){
 }
 async function share(){
   if (!totalLabels()) return;
-  let buf; try { buf = buildPdf(); } catch (e) { msg('Could not build the PDF.'); return; }
+  let buf; try { buf = await buildPdf(); } catch (e) { msg('Could not build the PDF.'); return; }
   const name = fileName();
   try {
     const f = new File([buf], name, {type:'application/pdf'});
@@ -466,7 +574,7 @@ $('dl').addEventListener('click', download);
 $('share').addEventListener('click', share);
 let rt; window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(drawPreview, 120); });
 
-if (!window.JsBarcode || !window.jspdf) { $('status').textContent = 'Some parts of the page did not load. Reload to try again.'; $('status').classList.add('err'); return; }
+if (!window.JsBarcode || !window.jspdf || !window.PDFLib) { $('status').textContent = 'Some parts of the page did not load. Reload to try again.'; $('status').classList.add('err'); return; }
 const wasExample = state.example;
 renderSizes(); renderRows(); changed();
 state.example = wasExample; save();
